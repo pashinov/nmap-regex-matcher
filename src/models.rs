@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use regex::bytes::Regex;
+use regex_automata::meta::Regex;
 use serde::Deserialize;
 
 #[derive(Deserialize)]

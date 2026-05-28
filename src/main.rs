@@ -4,10 +4,13 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
+use regex_automata::{Input, meta::Cache};
 
 use crate::models::{HttpRequest, Pattern};
 
+#[allow(warnings)]
 mod models;
+#[allow(warnings)]
 mod vscan;
 
 fn main() -> anyhow::Result<()> {
@@ -60,60 +63,50 @@ impl RunCmd {
             .num_threads(num_threads)
             .thread_name(|i| format!("regex-worker-{i}"))
             .build()?;
-        
+
         let num_patterns = patterns.len();
         eprintln!(
             "Matching: {} requests × {num_patterns} patterns, {num_threads} threads",
             requests.len()
         );
 
+        let chunk_size = requests.len().div_ceil(num_threads);
+
         let start = Instant::now();
-        let total_matches = pool.install(|| {
+        let total_matches: u64 = pool.install(|| {
             requests
-                .par_iter()
-                .map(|data| match_request(&patterns, data))
-                .sum::<u64>()
+                .par_chunks(chunk_size)
+                .map(|chunk| {
+                    let mut count = 0u64;
+
+                    let mut caches: Vec<Cache> =
+                        patterns.iter().map(|p| p.regex.create_cache()).collect();
+
+                    for data in chunk {
+                        let input = Input::new(data);
+                        for (pat, cache) in patterns.iter().zip(caches.iter_mut()) {
+                            if pat.regex.search_with(cache, &input).is_some() {
+                                count += 1;
+                            }
+                        }
+                    }
+
+                    count
+                })
+                .sum()
         });
         let elapsed = start.elapsed();
 
         let throughput = requests.len() as f64 / elapsed.as_secs_f64();
-        eprintln!("\n=== Baseline Results ===");
+        eprintln!("\n=== Results ===");
         eprintln!("Requests:    {}", requests.len());
         eprintln!("Patterns:    {num_patterns}");
         eprintln!("Total matches: {total_matches}");
-        eprintln!("Wall-clock:  {:.3}s", elapsed.as_secs_f64());
+        eprintln!("Elapsed:     {:.3}s", elapsed.as_secs_f64());
         eprintln!("Throughput:  {throughput:.1} req/s");
 
         Ok(())
     }
-}
-
-fn load_patterns(path: &Path) -> Vec<Pattern> {
-    let probes = vscan::load_service_probes(path).expect("failed to parse nmap-service-probes");
-    let mut patterns = Vec::new();
-
-    for (probe_index, probe) in probes.tcp.iter().enumerate() {
-        for m in &probe.matches {
-            patterns.push(Pattern {
-                service: m.service_name.clone(),
-                soft: m.soft,
-                regex: m.regex.clone(),
-                probe_index,
-            });
-        }
-    }
-    for (probe_index, probe) in probes.udp.iter().enumerate() {
-        for m in &probe.matches {
-            patterns.push(Pattern {
-                service: m.service_name.clone(),
-                soft: m.soft,
-                regex: m.regex.clone(),
-                probe_index: probes.tcp.len() + probe_index,
-            });
-        }
-    }
-
-    patterns
 }
 
 trait Normalize {
@@ -134,13 +127,46 @@ impl Normalize for HttpRequest {
             buf.extend_from_slice(b"\r\n");
         }
         buf.extend_from_slice(b"\r\n");
-        if let Some(body) = &self.data {
-            if !body.is_empty() {
-                buf.extend_from_slice(body.as_bytes());
-            }
+        if let Some(body) = &self.data
+            && !body.is_empty()
+        {
+            buf.extend_from_slice(body.as_bytes());
         }
+
         buf
     }
+}
+
+fn load_patterns(path: &Path) -> Vec<Pattern> {
+    let probes = vscan::load_service_probes(path).expect("failed to parse nmap-service-probes");
+    let mut patterns = Vec::new();
+
+    for (probe_index, probe) in probes.tcp.iter().enumerate() {
+        for m in &probe.matches {
+            if let Ok(re) = regex_automata::meta::Regex::new(m.regex.as_str()) {
+                patterns.push(Pattern {
+                    service: m.service_name.clone(),
+                    soft: m.soft,
+                    regex: re,
+                    probe_index,
+                });
+            }
+        }
+    }
+    for (probe_index, probe) in probes.udp.iter().enumerate() {
+        for m in &probe.matches {
+            if let Ok(re) = regex_automata::meta::Regex::new(m.regex.as_str()) {
+                patterns.push(Pattern {
+                    service: m.service_name.clone(),
+                    soft: m.soft,
+                    regex: re,
+                    probe_index: probes.tcp.len() + probe_index,
+                });
+            }
+        }
+    }
+
+    patterns
 }
 
 fn load_corpus(dirs: &[&Path], limit: usize) -> anyhow::Result<Vec<Vec<u8>>> {
@@ -172,14 +198,4 @@ fn load_corpus(dirs: &[&Path], limit: usize) -> anyhow::Result<Vec<Vec<u8>>> {
     }
 
     Ok(requests)
-}
-
-fn match_request(patterns: &[Pattern], data: &[u8]) -> u64 {
-    let mut count = 0u64;
-    for pat in patterns {
-        if pat.regex.is_match(data) {
-            count += 1;
-        }
-    }
-    count
 }
