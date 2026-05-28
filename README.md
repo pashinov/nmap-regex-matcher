@@ -74,3 +74,13 @@ Full run on ~1M requests:
 |       8 |           14,896.1 |    4.0x |   6.71s |
 |      16 |           24,108.4 |    6.4x |   4.15s |
 |      32 |           17,539.0 |    4.7x |   5.70s |
+
+### Full corpus (~1.1M requests, 16 threads)
+
+```
+Requests:    1,114,166
+Patterns:    9,504
+Total matches: 1,399,824
+Elapsed:     41.588s
+Throughput:  26,790.6 req/s
+```
